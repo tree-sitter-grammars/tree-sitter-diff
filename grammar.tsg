@@ -1,0 +1,118 @@
+// diff grammar for tree-sitter (native DSL).
+// Translated from grammar.js.
+
+let NEWLINE: rule_t = regexp(r"\r?\n")
+let WHITE_SPACE: rule_t = regexp(r"[\t\f\v ]+")
+let ANYTHING: rule_t = regexp(r"[^\r\n]+")
+
+// Most JS `iseq(start, x)` calls are the 2-arg form; longer ones inline
+// `token_immediate` directly.
+macro iseq(start: str_t, rest: rule_t) rule_t {
+    seq(token_immediate(start), rest)
+}
+
+grammar {
+    language: "diff",
+    extras: [WHITE_SPACE],
+}
+
+rule source {
+    seq(
+        repeat(choice(block, seq(optional(_line), NEWLINE))),
+        optional(_line),
+    )
+}
+
+rule _line {
+    choice(
+        file_change, binary_change, index, similarity,
+        old_file, new_file, location,
+        addition, deletion, context, comment,
+    )
+}
+
+rule block {
+    prec_right(0, seq(
+        command,
+        NEWLINE,
+        repeat(seq(
+            choice(file_change, binary_change, index, similarity),
+            NEWLINE,
+        )),
+        optional(seq(old_file, NEWLINE, new_file, NEWLINE, hunks)),
+    ))
+}
+
+rule hunks { prec_right(0, repeat1(hunk)) }
+
+rule hunk {
+    prec_right(0, seq(
+        field(location, location),
+        NEWLINE,
+        optional(field(changes, changes)),
+    ))
+}
+
+rule changes {
+    prec_right(0, repeat1(seq(
+        choice(addition, deletion, context),
+        prec_right(0, repeat1(NEWLINE)),
+    )))
+}
+
+rule command {
+    seq(token_immediate("diff"), alias(regexp(r"[-\w]+"), argument), filename)
+}
+
+rule file_change {
+    choice(
+        seq(choice("new", "deleted"), "file", "mode", mode),
+        seq(choice("new", "old"), "mode", mode),
+        seq("rename", choice("from", "to"), filename),
+    )
+}
+
+rule binary_change {
+    seq(token_immediate("Binary"), "files", filename, "and", filename, "differ")
+}
+
+rule index {
+    seq(token_immediate("index"), commit, "..", commit, optional(mode))
+}
+
+rule similarity {
+    seq(token_immediate("similarity"), "index", alias(regexp(r"\d+"), score), "%")
+}
+
+rule old_file { iseq("---", filename) }
+rule new_file { iseq("+++", filename) }
+
+rule location {
+    seq(token_immediate("@@"), linerange, linerange, "@@", optional(ANYTHING))
+}
+
+rule addition {
+    choice(
+        iseq("+", optional(ANYTHING)),
+        iseq("++", optional(ANYTHING)),
+        token_immediate("+++"),
+        iseq("++++", optional(ANYTHING)),
+    )
+}
+
+rule deletion {
+    choice(
+        iseq("-", optional(ANYTHING)),
+        iseq("--", optional(ANYTHING)),
+        token_immediate("---"),
+        iseq("----", optional(ANYTHING)),
+    )
+}
+
+rule context { token(prec(-1, ANYTHING)) }
+rule comment { iseq("#", optional(ANYTHING)) }
+
+rule linerange { regexp(r"[-\+]\d+(,\d+)?") }
+rule filename { repeat1(regexp(r"\S+")) }
+rule commit { regexp(r"[a-f0-9]{7,40}") }
+rule mode { regexp(r"\d+") }
