@@ -4,6 +4,8 @@
 let NEWLINE: rule_t = regexp(r"\r?\n")
 let WHITE_SPACE: rule_t = regexp(r"[\t\f\v ]+")
 let ANYTHING: rule_t = regexp(r"[^\r\n]+")
+let BASE85_LINE: str_t = r"[A-Za-z][0-9A-Za-z!#$%&()*+\-;<=>?@^_`{|}~]+"
+let BASE85: str_t = concat(BASE85_LINE, "(?:", r"\r?\n", BASE85_LINE, ")*")
 
 // Most JS `iseq(start, x)` calls are the 2-arg form; longer ones inline
 // `token_immediate` directly.
@@ -25,9 +27,9 @@ rule source {
 
 rule _line {
     choice(
-        file_change, binary_change, index, similarity,
+        file_change, binary_change, index, similarity, dissimilarity,
         old_file, new_file, location,
-        addition, deletion, context, comment,
+        addition, deletion, change, context, comment, special, unrecognized,
     )
 }
 
@@ -36,12 +38,37 @@ rule block {
         command,
         NEWLINE,
         repeat(seq(
-            choice(file_change, binary_change, index, similarity),
+            choice(file_change, binary_change, index, similarity, dissimilarity),
             NEWLINE,
         )),
-        optional(seq(old_file, NEWLINE, new_file, NEWLINE, hunks)),
+        optional(choice(
+            seq(old_file, NEWLINE, new_file, NEWLINE, hunks),
+            binary_patch,
+        )),
     ))
 }
+
+rule binary_patch {
+    prec_right(0, seq(
+        seq(token_immediate("GIT"), "binary", "patch"),
+        NEWLINE,
+        field(forward, binary_hunk),
+        optional(field(reverse, binary_hunk)),
+    ))
+}
+
+rule binary_hunk {
+    prec_right(0, seq(
+        choice(token_immediate("literal"), token_immediate("delta")),
+        alias(regexp(r"\d+"), size),
+        NEWLINE,
+        payload,
+        NEWLINE,
+        prec_right(0, repeat(NEWLINE)),
+    ))
+}
+
+rule payload { token_immediate(regexp(BASE85)) }
 
 rule hunks { prec_right(0, repeat1(hunk)) }
 
@@ -55,7 +82,16 @@ rule hunk {
 
 rule changes {
     prec_right(0, repeat1(seq(
-        choice(addition, deletion, context),
+        choice(
+            alias(_hunk_addition, addition),
+            alias(_hunk_deletion, deletion),
+            addition,
+            deletion,
+            change,
+            context,
+            special,
+            unrecognized,
+        ),
         prec_right(0, repeat1(NEWLINE)),
     )))
 }
@@ -68,7 +104,7 @@ rule file_change {
     choice(
         seq(choice("new", "deleted"), "file", "mode", mode),
         seq(choice("new", "old"), "mode", mode),
-        seq("rename", choice("from", "to"), filename),
+        seq(choice("rename", "copy"), choice("from", "to"), filename),
     )
 }
 
@@ -84,6 +120,10 @@ rule similarity {
     seq(token_immediate("similarity"), "index", alias(regexp(r"\d+"), score), "%")
 }
 
+rule dissimilarity {
+    seq(token_immediate("dissimilarity"), "index", alias(regexp(r"\d+"), score), "%")
+}
+
 rule old_file { iseq("---", filename) }
 rule new_file { iseq("+++", filename) }
 
@@ -91,12 +131,16 @@ rule location {
     seq(token_immediate("@@"), linerange, linerange, "@@", optional(ANYTHING))
 }
 
+rule _hunk_addition { iseq("+++", ANYTHING) }
+rule _hunk_deletion { iseq("---", ANYTHING) }
+
 rule addition {
     choice(
         iseq("+", optional(ANYTHING)),
         iseq("++", optional(ANYTHING)),
         token_immediate("+++"),
         iseq("++++", optional(ANYTHING)),
+        iseq(">", optional(ANYTHING)),
     )
 }
 
@@ -106,13 +150,17 @@ rule deletion {
         iseq("--", optional(ANYTHING)),
         token_immediate("---"),
         iseq("----", optional(ANYTHING)),
+        iseq("<", optional(ANYTHING)),
     )
 }
 
-rule context { token(prec(-1, ANYTHING)) }
+rule change { iseq("!", optional(ANYTHING)) }
+rule context { iseq(" ", optional(ANYTHING)) }
 rule comment { iseq("#", optional(ANYTHING)) }
+rule special { iseq(r"\", optional(ANYTHING)) }
+rule unrecognized { token(prec(-1, ANYTHING)) }
 
 rule linerange { regexp(r"[-\+]\d+(,\d+)?") }
 rule filename { repeat1(regexp(r"\S+")) }
-rule commit { regexp(r"[a-f0-9]{7,40}") }
+rule commit { regexp(r"[a-f0-9]{4,64}") }
 rule mode { regexp(r"\d+") }
